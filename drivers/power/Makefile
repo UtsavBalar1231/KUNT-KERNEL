@@ -80,6 +80,7 @@ obj-$(CONFIG_QPNP_SMBCHARGER_MMI)	+= qpnp-smbcharger-mmi.o pmic-voter.o
 obj-$(CONFIG_QPNP_SMBCHARGER_MMI_LITE)	+= qpnp-smbcharger-mmi-lite.o pmic-voter.o
 
 obj-$(CONFIG_QPNP_TYPEC)	+= qpnp-typec.o
+obj-$(CONFIG_QNS_SYSTEM)	+= qns_system.o
 obj-$(CONFIG_CHARGER_TPS65090)	+= tps65090-charger.o
 obj-$(CONFIG_BATTERY_BCL)	+= battery_current_limit.o
 obj-$(CONFIG_MSM_BCL_CTL)	+= msm_bcl.o
