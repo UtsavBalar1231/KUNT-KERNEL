@@ -2716,9 +2716,14 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 	case MDSS_EVENT_POST_PANEL_ON:
 		rc = mdss_dsi_post_panel_on(pdata);
 		break;
+	case MDSS_EVENT_PANEL_ON:
 #ifdef CONFIG_STATE_NOTIFIER
 		state_resume();
 #endif
+		ctrl_pdata->ctrl_state |= CTRL_STATE_MDP_ACTIVE;
+		if (ctrl_pdata->on_cmds.link_state == DSI_HS_MODE)
+			rc = mdss_dsi_unblank(pdata);
+		pdata->panel_info.esd_rdy = true;
 		break;
 	case MDSS_EVENT_BLANK:
 		power_state = (int) (unsigned long) arg;
@@ -2732,13 +2737,10 @@ static int mdss_dsi_event_handler(struct mdss_panel_data *pdata,
 		if (ctrl_pdata->off_cmds.link_state == DSI_LP_MODE)
 			rc = mdss_dsi_blank(pdata, power_state);
 		rc = mdss_dsi_off(pdata, power_state);
-<<<<<<< HEAD
 		atomic_set(&ctrl_pdata->disp_is_on, 0);
-=======
 #ifdef CONFIG_STATE_NOTIFIER
 		state_suspend();
 #endif
->>>>>>> 1ed4118... state_notifier: added related track into mdss events
 		break;
 	case MDSS_EVENT_CONT_SPLASH_FINISH:
 		if (ctrl_pdata->off_cmds.link_state == DSI_LP_MODE)
