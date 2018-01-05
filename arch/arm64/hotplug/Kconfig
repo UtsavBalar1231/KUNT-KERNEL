@@ -1,0 +1,6 @@
+config MAKO_HOTPLUG
+        bool "Mako hotplug driver by franciscofranco"
+        depends on HOTPLUG_CPU
+        default n
+        help
+          Hotplugging driver by franciscofranco.
