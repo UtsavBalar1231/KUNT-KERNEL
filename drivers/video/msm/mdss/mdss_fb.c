@@ -2239,7 +2239,8 @@ static int mdss_fb_blank_unblank(struct msm_fb_data_type *mfd)
 
 		/* Start the work thread to signal idle time */
 		if (mfd->idle_time)
-			schedule_delayed_work(&mfd->idle_notify_work,
+			queue_delayed_work(system_power_efficient_wq,
+				&mfd->idle_notify_work,
 				msecs_to_jiffies(mfd->idle_time));
 	}
 
@@ -4063,7 +4064,7 @@ static int __mdss_fb_display_thread(void *data)
 				mfd->index);
 
 	while (1) {
-		wait_event(mfd->commit_wait_q,
+		wait_event_interruptible(mfd->commit_wait_q,
 				(atomic_read(&mfd->commits_pending) ||
 				 kthread_should_stop()));
 
