@@ -48,7 +48,7 @@ mount -o ro,remount -t auto /vendor 2>/dev/null;
 
 backup_file init.rc;
 
-insert_line init.rc "init.cunt.rc" after "import /init.usb.configfs.rc" "import /init.cunt.rc";
+insert_line init.rc "init.spectrum.rc" after "import /init.usb.configfs.rc" "import /init.spectrum.rc";
 
 # end ramdisk changes
 
