@@ -15,7 +15,9 @@ ZIP_DIR=$KERNEL_DIR/zip/
 KERNEL=CUNT-KERNEL
 NAME=The-TrUmp
 TYPE=HMP-$NAME-Release
+SPECTRUM=$KERNEL_DIR/spectrum/
 FINAL_KERNEL_ZIP=$KERNEL-$TYPE-$DATE_POSTFIX.zip
+SPECTRUM_ZIP=$KERNEL-SPECTRUM-$TYPE-$DATE_POSTFIX.zip
 # Speed up build process
 MAKE="./makeparallel"
 
@@ -68,24 +70,35 @@ ls $KERNEL_DIR/out/arch/arm64/boot/Image.gz
 
 echo -e "$R // Verifying zip Directory //"
 ls $ZIP_DIR
+ls $SPECTRUM
+
 echo "// Removing leftovers //"
 rm -rf $ZIP_DIR/Image.gz
 rm -rf $ZIP_DIR/$FINAL_KERNEL_ZIP
+rm -rf $SPECTRUM/Image.gz
+rm -rf $SPECTRUM/$SPECTRUM_ZIP
 
 echo -e "$R // Copying Image.gz //"
 cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz $ZIP_DIR/
+cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz $SPECTRUM/
 
 echo -e "$R // Time to zip everything up! //"
 cd $ZIP_DIR/
 zip -r9 $FINAL_KERNEL_ZIP * -x README $FINAL_KERNEL_ZIP
 cp $KERNEL_DIR/zip/$FINAL_KERNEL_ZIP /home/utsavbalar1231/$FINAL_KERNEL_ZIP
 
+cd $SPECTRUM/
+zip -r9 $SPECTRUM_ZIP * -x README $SPECTRUM_ZIP
+cp $KERNEL_DIR/spectrum/$SPECTRUM_ZIP /home/utsavbalar1231/$SPECTRUM_ZIP
+
 echo -e "$yellow // Build Successfull  //"
 cd $KERNEL_DIR
 echo -e "$R // Cleaning up //"
 
 rm -rf $ZIP_DIR/$FINAL_KERNEL_ZIP
+rm -rf $SPECTRUM/$SPECTRUM_ZIP
 rm -rf zip/Image.gz
+rm -rf spectrum/Image.gz
 rm -rf $KERNEL_DIR/out/
 
 BUILD_END=$(date +"%s")
