@@ -1,0 +1,3 @@
+[submodule "dtbtool"]
+	path = dtbtool
+	url = https://github.com/xiaolu/mkbootimg_tools
