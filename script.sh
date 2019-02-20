@@ -9,15 +9,13 @@ KERNEL_DIR=$PWD
 KERNEL_TOOLCHAIN=~/gcc/bin/aarch64-linux-android-
 CLANG_TOOLCHAIN=/home/utsavbalar1231/clang/bin/clang-9
 KERNEL_DEFCONFIG=potter_defconfig
-DTBTOOL=$KERNEL_DIR/Dtbtool/
+DTB=$KERNEL_DIR/dtbtool/
 JOBS=16
 ZIP_DIR=$KERNEL_DIR/zip/
 KERNEL=CUNT-KERNEL
-NAME=The-TrUmp
-TYPE=HMP-$NAME-Release
-SPECTRUM=$KERNEL_DIR/spectrum/
-FINAL_KERNEL_ZIP=$KERNEL-$TYPE-$DATE_POSTFIX.zip
-SPECTRUM_ZIP=$KERNEL-SPECTRUM-$TYPE-$DATE_POSTFIX.zip
+NAME=Official
+TYPE=UniFied-$NAME-Release
+FINAL_KERNEL_ZIP=$KERNEL~$TYPE-$DATE_POSTFIX.zip
 # Speed up build process
 MAKE="./makeparallel"
 
@@ -65,42 +63,45 @@ echo -e "***********************************************$nocol"
 make $KERNEL_DEFCONFIG O=out
 make -j$JOBS CC=$CLANG_TOOLCHAIN CLANG_TRIPLE=aarch64-linux-android- O=out
 
+echo -e "$blue***********************************************"
+ echo " // Generating DT.img //"
+echo -e "***********************************************$nocol"
+$DTB/dtbToolCM -2 -o $KERNEL_DIR/out/arch/arm64/boot/dtb -s 2048 -p $KERNEL_DIR/out/scripts/dtc/ $KERNEL_DIR/out/arch/arm64/boot/dts/qcom/
+
 echo -e "$R // Verify Image.gz //"
 ls $KERNEL_DIR/out/arch/arm64/boot/Image.gz
 
+echo -e "$R // Verify dtb //"
+ls $KERNEL_DIR/out/arch/arm64/boot/dtb
+
 echo -e "$R // Verifying zip Directory //"
-ls $ZIP_DIR
-ls $SPECTRUM
+ls $ZIP_DIR/
 
 echo "// Removing leftovers //"
 rm -rf $ZIP_DIR/Image.gz
 rm -rf $ZIP_DIR/$FINAL_KERNEL_ZIP
-rm -rf $SPECTRUM/Image.gz
-rm -rf $SPECTRUM/$SPECTRUM_ZIP
+rm -rf $ZIP_DIR/dtb
 
 echo -e "$R // Copying Image.gz //"
-cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz $ZIP_DIR/
-cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz $SPECTRUM/
+
+cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz $ZIP_DIR/treble-unsupported/
+echo -e "$R // Copying dtb //"
+cp $KERNEL_DIR/out/arch/arm64/boot/dtb $ZIP_DIR/treble-unsupported/
 
 echo -e "$R // Time to zip everything up! //"
 cd $ZIP_DIR/
 zip -r9 $FINAL_KERNEL_ZIP * -x README $FINAL_KERNEL_ZIP
 cp $KERNEL_DIR/zip/$FINAL_KERNEL_ZIP /home/utsavbalar1231/$FINAL_KERNEL_ZIP
 
-cd $SPECTRUM/
-zip -r9 $SPECTRUM_ZIP * -x README $SPECTRUM_ZIP
-cp $KERNEL_DIR/spectrum/$SPECTRUM_ZIP /home/utsavbalar1231/$SPECTRUM_ZIP
-
 echo -e "$yellow // Build Successfull  //"
 cd $KERNEL_DIR
 echo -e "$R // Cleaning up //"
 
 rm -rf $ZIP_DIR/$FINAL_KERNEL_ZIP
-rm -rf $SPECTRUM/$SPECTRUM_ZIP
 rm -rf zip/Image.gz
-rm -rf spectrum/Image.gz
+rm -rf zip/dtb
 rm -rf $KERNEL_DIR/out/
 
 BUILD_END=$(date +"%s")
 DIFF=$(($BUILD_END - $BUILD_START))
-echo -e "$yellow CUNT•KERNEL Build completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds.$nocol"
+echo -e "$yellow CUNT•KERNEL Build completed in $(($DIFF / 60)) minute(s) and $(($DIFF % 60)) seconds."
