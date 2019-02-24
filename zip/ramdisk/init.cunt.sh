@@ -17,10 +17,14 @@ sleep 25;
 	echo 0 > /sys/devices/system/cpu/cpufreq/policy4/schedutil/pl
 	echo 0 > /sys/devices/system/cpu/cpufreq/policy4/schedutil/hispeed_freq
 
+
 # Input boost and stune configuration
-	echo 1804800 > /sys/module/cpu_input_boost/parameters/input_boost_freq
-	echo 128 > /sys/module/cpu_input_boost/parameters/input_boost_duration
-	echo 20 > /sys/module/cpu_input_boost/parameters/dynamic_stune_boost
+	echo "0:1401600 1:0 2:0 3:0 4:1401600 5:0 6:0 7:0" > /sys/module/cpu_boost/parameters/input_boost_freq
+	echo 250 > /sys/module/cpu_boost/parameters/input_boost_ms
+	echo 25 > /sys/module/cpu_boost/parameters/dynamic_stune_boost
+	echo 1000 > /sys/module/cpu_boost/parameters/dynamic_stune_boost_ms
+
+
 
 # Disable Boost_No_Override
 	echo 0 > /dev/stune/foreground/schedtune.sched_boost_no_override
