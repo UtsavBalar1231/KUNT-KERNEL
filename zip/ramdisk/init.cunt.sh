@@ -1,52 +1,124 @@
 #!/system/bin/sh
-# Taken From RenderZenith Kernel
-sleep 25;
 
-# Applying CUNT•KERNEL Settings
+################################################################################
+# helper functions to allow Android init like script
 
-# Setup Schedutil Governor
-	echo "schedutil" > /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
-	echo 500 > /sys/devices/system/cpu/cpufreq/policy0/schedutil/up_rate_limit_us
-	echo 20000 > /sys/devices/system/cpu/cpufreq/policy0/schedutil/down_rate_limit_us
-	echo 0 > /sys/devices/system/cpu/cpufreq/policy0/schedutil/pl
-	echo 0 > /sys/devices/system/cpu/cpufreq/policy0/schedutil/hispeed_freq
+function write() {
+    echo -n $2 > $1
+}
 
-	echo "schedutil" > /sys/devices/system/cpu/cpu4/cpufreq/scaling_governor
-	echo 500 > /sys/devices/system/cpu/cpufreq/policy4/schedutil/up_rate_limit_us
-	echo 20000 > /sys/devices/system/cpu/cpufreq/policy4/schedutil/down_rate_limit_us
-	echo 0 > /sys/devices/system/cpu/cpufreq/policy4/schedutil/pl
-	echo 0 > /sys/devices/system/cpu/cpufreq/policy4/schedutil/hispeed_freq
+function copy() {
+    cat $1 > $2
+}
 
-# Input boost and stune configuration
-	echo 1804800 > /sys/module/cpu_input_boost/parameters/input_boost_freq
-	echo 128 > /sys/module/cpu_input_boost/parameters/input_boost_duration
-	echo 20 > /sys/module/cpu_input_boost/parameters/dynamic_stune_boost
+# macro to write pids to system-background cpuset
+function writepid_sbg() {
+    until [ ! "$1" ]; do
+        echo -n $1 > /dev/cpuset/system-background/tasks;
+        shift;
+    done;
+}
 
-# Disable Boost_No_Override
-	echo 0 > /dev/stune/foreground/schedtune.sched_boost_no_override
-	echo 0 > /dev/stune/top-app/schedtune.sched_boost_no_override
+################################################################################
 
-# set default schedTune value for foreground/top-app
-	echo 1 > /dev/stune/foreground/schedtune.prefer_idle
-	echo 1 > /dev/stune/top-app/schedtune.boost
-	echo 1 > /dev/stune/top-app/schedtune.prefer_idle
+{
 
-#Enable PEWQ
-	echo Y > /sys/module/workqueue/parameters/power_efficient
+sleep 10;
 
-# Adjust SCHED Features
-	echo NO_EAS_USE_NEED_IDLE > /sys/kernel/debug/sched_features
-	echo TTWU_QUEUE > /sys/kernel/debug/sched_features
+write /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 2160000;
 
-# Disable CAF task placement for Big Cores
-	echo 0 > /proc/sys/kernel/sched_walt_rotate_big_tasks
+# Set the default IRQ affinity to the silver cluster.
+write /proc/irq/default_smp_affinity f
 
-# Disable Autogrouping
-	echo 0 > /proc/sys/kernel/sched_autogroup_enabled
+# Setup final cpuset
+write /dev/cpuset/top-app/cpus 0-7
+write /dev/cpuset/foreground/boost/cpus 0-3,6-7
+write /dev/cpuset/foreground/cpus 0-3,6-7
+write /dev/cpuset/background/cpus 0-1
+write /dev/cpuset/system-background/cpus 0-3
 
-# Setup EAS cpusets values for better load balancing
-	echo 0-7 > /dev/cpuset/top-app/cpus
-	# Since we are not using core rotator, lets load balance
-	echo 0-3,6-7 > /dev/cpuset/foreground/cpus
-	echo 0-3 > /dev/cpuset/background/cpus
-	echo 0-3  > /dev/cpuset/system-background/cpus
+# Runtime fs tuning: as we have init boottime setting and kernel patch setting
+# default readahead to 2048KB. We should adjust the setting upon boot_complete
+# for runtime performance
+write /sys/block/sda/queue/read_ahead_kb 128
+write /sys/block/sda/queue/nr_requests 128
+write /sys/block/sda/queue/iostats 1
+write /sys/block/sda/queue/scheduler cfq
+
+write /sys/block/sde/queue/read_ahead_kb 128
+write /sys/block/sde/queue/nr_requests 128
+write /sys/block/sde/queue/iostats 1
+write /sys/block/sde/queue/scheduler cfq
+
+write /sys/block/sde/queue/read_ahead_kb 128
+write /sys/block/sde/queue/nr_requests 128
+write /sys/block/sde/queue/iostats 1
+write /sys/block/sde/queue/scheduler cfq
+
+write /sys/block/dm-0/queue/read_ahead_kb 128
+write /sys/block/dm-0/queue/nr_requests 128
+write /sys/block/dm-0/queue/iostats 1
+write /sys/block/dm-0/queue/scheduler cfq
+
+sleep 20;
+
+QSEECOMD=`pidof qseecomd`
+THERMAL-ENGINE=`pidof thermal-engine`
+TIME_DAEMON=`pidof time_daemon`
+IMSQMIDAEMON=`pidof imsqmidaemon`
+IMSDATADAEMON=`pidof imsdatadaemon`
+DASHD=`pidof dashd`
+CND=`pidof cnd`
+DPMD=`pidof dpmd`
+RMT_STORAGE=`pidof rmt_storage`
+TFTP_SERVER=`pidof tftp_server`
+NETMGRD=`pidof netmgrd`
+IPACM=`pidof ipacm`
+QTI=`pidof qti`
+LOC_LAUNCHER=`pidof loc_launcher`
+QSEEPROXYDAEMON=`pidof qseeproxydaemon`
+IFAADAEMON=`pidof ifaadaemon`
+LOGCAT=`pidof logcat`
+LMKD=`pidof lmkd`
+PERFD=`pidof perfd`
+IOP=`pidof iop`
+MSM_IRQBALANCE=`pidof msm_irqbalance`
+SEEMP_HEALTHD=`pidof seemp_healthd`
+ESEPMDAEMON=`pidof esepmdaemon`
+WPA_SUPPLICANT=`pidof wpa_supplicant`
+SEEMPD=`pidof seempd`
+EMBRYO=`pidof embryo`
+HEALTHD=`pidof healthd`
+OEMLOGKIT=`pidof oemlogkit`
+NETD=`pidof netd`
+
+writepid_sbg $QSEECOMD;
+writepid_sbg $THERMAL-ENGINE;
+writepid_sbg $TIME_DAEMON;
+writepid_sbg $IMSQMIDAEMON;
+writepid_sbg $IMSDATADAEMON;
+writepid_sbg $DASHD;
+writepid_sbg $CND;
+writepid_sbg $DPMD;
+writepid_sbg $RMT_STORAGE;
+writepid_sbg $TFTP_SERVER;
+writepid_sbg $NETMGRD;
+writepid_sbg $IPACM;
+writepid_sbg $QTI;
+writepid_sbg $LOC_LAUNCHER;
+writepid_sbg $QSEEPROXYDAEMON;
+writepid_sbg $IFAADAEMON;
+writepid_sbg $LOGCAT;
+writepid_sbg $LMKD;
+writepid_sbg $PERFD;
+writepid_sbg $IOP;
+writepid_sbg $MSM_IRQBALANCE;
+writepid_sbg $SEEMP_HEALTHD;
+writepid_sbg $ESEPMDAEMON;
+writepid_sbg $WPA_SUPPLICANT;
+writepid_sbg $SEEMPD;
+writepid_sbg $HEALTHD;
+writepid_sbg $OEMLOGKIT;
+writepid_sbg $NETD;
+
+}&
