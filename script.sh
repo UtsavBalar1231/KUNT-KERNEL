@@ -15,8 +15,8 @@ JOBS=16
 ZIP_DIR=$KERNEL_DIR/zip/
 KERNEL=CUNT-KERNEL
 NAME=Official-EAS
-TYPE=UniFied-$NAME-Release
-FINAL_KERNEL_ZIP=$KERNEL~$TYPE-$DATE_POSTFIX.zip
+TYPE=UniFied-Treble-$NAME-Release
+FINAL_KERNEL_ZIP=$KERNEL-$TYPE-$DATE_POSTFIX.zip
 # Speed up build process
 MAKE="./makeparallel"
 
@@ -85,9 +85,9 @@ rm -rf $ZIP_DIR/dtb
 
 echo -e "$R // Copying Image.gz //"
 
-cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz $ZIP_DIR/treble-unsupported/
+cp $KERNEL_DIR/out/arch/arm64/boot/Image.gz $ZIP_DIR/treble-supported/
 echo -e "$R // Copying dtb //"
-cp $KERNEL_DIR/out/arch/arm64/boot/dtb $ZIP_DIR/treble-unsupported/
+cp $KERNEL_DIR/out/arch/arm64/boot/dtb $ZIP_DIR/treble-supported/
 
 echo -e "$R // Time to zip everything up! //"
 cd $ZIP_DIR/
