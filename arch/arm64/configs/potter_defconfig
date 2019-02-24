@@ -564,7 +564,7 @@ CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
 # CPU frequency scaling drivers
 #
 # CONFIG_CPUFREQ_DT is not set
-# CONFIG_CPU_BOOST is not set
+CONFIG_CPU_BOOST=uly
 
 #
 # ARM CPU frequency scaling drivers
