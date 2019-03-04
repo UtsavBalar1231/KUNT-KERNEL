@@ -15,6 +15,7 @@
 #include <sound/q6asm-v2.h>
 #include <sound/compress_params.h>
 #include <sound/msm-audio-effects-q6-v2.h>
+#include <sound/msm-dts-eagle.h>
 #include <sound/devdep_params.h>
 
 #define MAX_ENABLE_CMD_SIZE 32
@@ -48,6 +49,26 @@ bool msm_audio_effects_is_effmodule_supp_in_top(int effect_module,
 	case EQ_MODULE:
 		switch (topology) {
 		case ASM_STREAM_POSTPROC_TOPO_ID_SA_PLUS:
+		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS:
+		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
+			return true;
+		default:
+			return false;
+		}
+	case DTS_EAGLE_MODULE:
+		switch (topology) {
+		case ASM_STREAM_POSTPROC_TOPO_ID_DTS_HPX:
+		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS:
+		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
+			return true;
+		default:
+			return false;
+		}
+	case SOFT_VOLUME2_MODULE:
+	case DTS_EAGLE_MODULE_ENABLE:
+		switch (topology) {
+		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_PLUS:
+		case ASM_STREAM_POSTPROC_TOPO_ID_HPX_MASTER:
 			return true;
 		default:
 			return false;
@@ -79,8 +100,11 @@ int msm_audio_effects_enable_extn(struct audio_client *ac,
 	if (effects->virtualizer.enable_flag)
 		q6asm_send_audio_effects_params(ac, (char *)&updt_params[0],
 					params_length);
-	memset(updt_params, 0, MAX_ENABLE_CMD_SIZE);
-	params_length = 0;
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wpragmas"
+        #pragma GCC diagnostic ignored "-Wmemset-elt-size"
+        memset(updt_params, 0, MAX_ENABLE_CMD_SIZE);
+        params_length = 0;
 	updt_params[0] = AUDPROC_MODULE_ID_BASS_BOOST;
 	updt_params[1] = AUDPROC_PARAM_ID_ENABLE;
 	updt_params[2] = BASS_BOOST_ENABLE_PARAM_SZ;
@@ -90,6 +114,7 @@ int msm_audio_effects_enable_extn(struct audio_client *ac,
 		q6asm_send_audio_effects_params(ac, (char *)&updt_params[0],
 					params_length);
 	memset(updt_params, 0, MAX_ENABLE_CMD_SIZE);
+        #pragma GCC diagnostic pop
 	params_length = 0;
 	updt_params[0] = AUDPROC_MODULE_ID_POPLESS_EQUALIZER;
 	updt_params[1] = AUDPROC_PARAM_ID_ENABLE;
@@ -255,7 +280,7 @@ int msm_audio_effects_virtualizer_handler(struct audio_client *ac,
 			break;
 		}
 	}
-	if (params_length && (rc == 0))
+	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
 		q6asm_send_audio_effects_params(ac, params,
 						params_length);
 	else
@@ -726,7 +751,7 @@ int msm_audio_effects_reverb_handler(struct audio_client *ac,
 			break;
 		}
 	}
-	if (params_length && (rc == 0))
+	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
 		q6asm_send_audio_effects_params(ac, params,
 						params_length);
 	else
@@ -862,7 +887,7 @@ int msm_audio_effects_bass_boost_handler(struct audio_client *ac,
 			break;
 		}
 	}
-	if (params_length && (rc == 0))
+	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
 		q6asm_send_audio_effects_params(ac, params,
 						params_length);
 	else
@@ -1202,7 +1227,7 @@ int msm_audio_effects_popless_eq_handler(struct audio_client *ac,
 			break;
 		}
 	}
-	if (params_length && (rc == 0))
+	if (params_length && !msm_dts_eagle_is_hpx_on() && (rc == 0))
 		q6asm_send_audio_effects_params(ac, params,
 						params_length);
 	else

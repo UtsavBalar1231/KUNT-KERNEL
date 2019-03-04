@@ -471,15 +471,16 @@ static inline int entity_before(struct sched_entity *a,
 
 static void update_min_vruntime(struct cfs_rq *cfs_rq)
 {
+	struct rb_node *leftmost = rb_first_cached(&cfs_rq->tasks_timeline);
+
 	u64 vruntime = cfs_rq->min_vruntime;
 
 	if (cfs_rq->curr)
 		vruntime = cfs_rq->curr->vruntime;
 
-	if (cfs_rq->rb_leftmost) {
-		struct sched_entity *se = rb_entry(cfs_rq->rb_leftmost,
-						   struct sched_entity,
-						   run_node);
+	if (leftmost) { /* non-empty tree */
+		struct sched_entity *se;
+		se = rb_entry(leftmost, struct sched_entity, run_node);
 
 		if (!cfs_rq->curr)
 			vruntime = se->vruntime;
@@ -500,10 +501,10 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
  */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	struct rb_node **link = &cfs_rq->tasks_timeline.rb_node;
+	struct rb_node **link = &cfs_rq->tasks_timeline.rb_root.rb_node;
 	struct rb_node *parent = NULL;
 	struct sched_entity *entry;
-	int leftmost = 1;
+	bool leftmost = true;
 
 	/*
 	 * Find the right place in the rbtree:
@@ -519,36 +520,23 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			link = &parent->rb_left;
 		} else {
 			link = &parent->rb_right;
-			leftmost = 0;
+			leftmost = false;
 		}
 	}
 
-	/*
-	 * Maintain a cache of leftmost tree entries (it is frequently
-	 * used):
-	 */
-	if (leftmost)
-		cfs_rq->rb_leftmost = &se->run_node;
-
 	rb_link_node(&se->run_node, parent, link);
-	rb_insert_color(&se->run_node, &cfs_rq->tasks_timeline);
+	rb_insert_color_cached(&se->run_node,
+			       &cfs_rq->tasks_timeline, leftmost);
 }
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	if (cfs_rq->rb_leftmost == &se->run_node) {
-		struct rb_node *next_node;
-
-		next_node = rb_next(&se->run_node);
-		cfs_rq->rb_leftmost = next_node;
-	}
-
-	rb_erase(&se->run_node, &cfs_rq->tasks_timeline);
+	rb_erase_cached(&se->run_node, &cfs_rq->tasks_timeline);
 }
 
 struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 {
-	struct rb_node *left = cfs_rq->rb_leftmost;
+	struct rb_node *left = rb_first_cached(&cfs_rq->tasks_timeline);
 
 	if (!left)
 		return NULL;
@@ -569,7 +557,7 @@ static struct sched_entity *__pick_next_entity(struct sched_entity *se)
 #ifdef CONFIG_SCHED_DEBUG
 struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
 {
-	struct rb_node *last = rb_last(&cfs_rq->tasks_timeline);
+	struct rb_node *last = rb_last(&cfs_rq->tasks_timeline.rb_root);
 
 	if (!last)
 		return NULL;
@@ -4755,6 +4743,13 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+static unsigned int Larch_power = 0;
+
+void relay_ap(unsigned int ap)
+{
+	Larch_power = ap;
+}
+
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -4789,20 +4784,60 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
 
+/*
+ * MIGRATION
+ *
+ *	dequeue
+ *	  update_curr()
+ *	    update_min_vruntime()
+ *	  vruntime -= min_vruntime
+ *
+ *	enqueue
+ *	  update_curr()
+ *	    update_min_vruntime()
+ *	  vruntime += min_vruntime
+ *
+ * this way the vruntime transition between RQs is done when both
+ * min_vruntime are up-to-date.
+ *
+ * WAKEUP (remote)
+ *
+ *	->migrate_task_rq_fair() (p->state == TASK_WAKING)
+ *	  vruntime -= min_vruntime
+ *
+ *	enqueue
+ *	  update_curr()
+ *	    update_min_vruntime()
+ *	  vruntime += min_vruntime
+ *
+ * this way we don't have the most up-to-date min_vruntime on the originating
+ * CPU and an up-to-date min_vruntime on the destination CPU.
+ */
+
 static void
 enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 {
-	/*
-	 * Update the normalized vruntime before updating min_vruntime
-	 * through calling update_curr().
-	 */
-	if (!(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_WAKING))
-		se->vruntime += cfs_rq->min_vruntime;
+	bool renorm = !(flags & ENQUEUE_WAKEUP) || (flags & ENQUEUE_MIGRATED);
+	bool curr = cfs_rq->curr == se;
 
 	/*
-	 * Update run-time statistics of the 'current'.
+	 * If we're the current task, we must renormalise before calling
+	 * update_curr().
 	 */
+	if (renorm && curr)
+		se->vruntime += cfs_rq->min_vruntime;
+
 	update_curr(cfs_rq);
+
+	/*
+	 * Otherwise, renormalise after, such that we're placed at the current
+	 * moment in time, instead of some random moment in the past. Being
+	 * placed in the past could significantly boost this task to the
+	 * fairness detriment of existing tasks.
+	 */
+	if (renorm && !curr)
+		se->vruntime += cfs_rq->min_vruntime;
+
 	enqueue_entity_load_avg(cfs_rq, se, flags & ENQUEUE_WAKEUP);
 	account_entity_enqueue(cfs_rq, se);
 	update_cfs_shares(cfs_rq);
@@ -4823,6 +4858,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 #endif
 
 	if (se != cfs_rq->curr)
+	if (!curr)
 		__enqueue_entity(cfs_rq, se);
 	se->on_rq = 1;
 
@@ -6180,46 +6216,6 @@ static unsigned long cpu_avg_load_per_task(int cpu)
 	return 0;
 }
 
-static void record_wakee(struct task_struct *p)
-{
-	/*
-	 * Rough decay (wiping) for cost saving, don't worry
-	 * about the boundary, really active task won't care
-	 * about the loss.
-	 */
-	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
-		current->wakee_flips >>= 1;
-		current->wakee_flip_decay_ts = jiffies;
-	}
-
-	if (current->last_wakee != p) {
-		current->last_wakee = p;
-		current->wakee_flips++;
-	}
-}
-
-static void task_waking_fair(struct task_struct *p)
-{
-	struct sched_entity *se = &p->se;
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-	u64 min_vruntime;
-
-#ifndef CONFIG_64BIT
-	u64 min_vruntime_copy;
-
-	do {
-		min_vruntime_copy = cfs_rq->min_vruntime_copy;
-		smp_rmb();
-		min_vruntime = cfs_rq->min_vruntime;
-	} while (min_vruntime != min_vruntime_copy);
-#else
-	min_vruntime = cfs_rq->min_vruntime;
-#endif
-
-	se->vruntime -= min_vruntime;
-	record_wakee(p);
-}
-
 #ifdef CONFIG_FAIR_GROUP_SCHED
 /*
  * effective_load() calculates the load change as seen from the root_task_group
@@ -6334,6 +6330,23 @@ static long effective_load(struct task_group *tg, int cpu, long wl, long wg)
 }
 
 #endif
+
+static void record_wakee(struct task_struct *p)
+{
+	/*
+	 * Only decay a single time; tasks that have less then 1 wakeup per
+	 * jiffy will not have built up many flips.
+	 */
+	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
+		current->wakee_flips >>= 1;
+		current->wakee_flip_decay_ts = jiffies;
+	}
+
+	if (current->last_wakee != p) {
+		current->last_wakee = p;
+		current->wakee_flips++;
+	}
+}
 
 static int wake_wide(struct task_struct *p)
 {
@@ -6615,7 +6628,9 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 		return select_best_cpu(p, prev_cpu, 0, sync);
 
 	if (sd_flag & SD_BALANCE_WAKE)
-		want_affine = cpumask_test_cpu(cpu, tsk_cpus_allowed(p));
+		record_wakee(p);
+        
+        want_affine = cpumask_test_cpu(cpu, tsk_cpus_allowed(p));
 
 	rcu_read_lock();
 	for_each_domain(cpu, tmp) {
@@ -6697,11 +6712,31 @@ migrate_task_rq_fair(struct task_struct *p, int next_cpu)
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
 	/*
-	 * Load tracking: accumulate removed load so that it can be processed
-	 * when we next update owning cfs_rq under rq->lock.  Tasks contribute
-	 * to blocked load iff they have a positive decay-count.  It can never
-	 * be negative here since on-rq tasks have decay-count == 0.
+	 * As blocked tasks retain absolute vruntime the migration needs to
+	 * deal with this by subtracting the old and adding the new
+	 * min_vruntime -- the latter is done by enqueue_entity() when placing
+	 * the task on the new runqueue.
 	 */
+	if (p->state == TASK_WAKING) {
+		struct sched_entity *se = &p->se;
+		struct cfs_rq *cfs_rq = cfs_rq_of(se);
+		u64 min_vruntime;
+
+#ifndef CONFIG_64BIT
+		u64 min_vruntime_copy;
+
+		do {
+			min_vruntime_copy = cfs_rq->min_vruntime_copy;
+			smp_rmb();
+			min_vruntime = cfs_rq->min_vruntime;
+		} while (min_vruntime != min_vruntime_copy);
+#else
+		min_vruntime = cfs_rq->min_vruntime;
+#endif
+
+		se->vruntime -= min_vruntime;
+	}
+
 	if (se->avg.decay_count) {
 		se->avg.decay_count = -__synchronize_entity_decay(se);
 		atomic_long_add(se->avg.load_avg_contrib,
@@ -7538,6 +7573,13 @@ static int detach_tasks(struct lb_env *env)
 
 redo:
 	while (!list_empty(tasks)) {
+		/*
+		 * We don't want to steal all, otherwise we may be treated likewise,
+		 * which could at worst lead to a livelock crash.
+		 */
+		if (env->idle != CPU_NOT_IDLE && env->src_rq->nr_running <= 1)
+			break;
+
 		p = list_first_entry(tasks, struct task_struct, se.group_node);
 
 		env->loop++;
@@ -7980,6 +8022,7 @@ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 	unsigned long capacity = SCHED_CAPACITY_SCALE;
 	struct sched_group *sdg = sd->groups;
 
+
 	if (sched_feat(ARCH_CAPACITY))
 		capacity *= arch_scale_cpu_capacity(sd, cpu);
 	else
@@ -7988,6 +8031,7 @@ static void update_cpu_capacity(struct sched_domain *sd, int cpu)
 	capacity >>= SCHED_CAPACITY_SHIFT;
 
 	sdg->sgc->capacity_orig = capacity;
+
 
 	if (sched_feat(ARCH_CAPACITY))
 		capacity *= arch_scale_freq_capacity(sd, cpu);
@@ -9982,14 +10026,16 @@ static void run_rebalance_domains(struct softirq_action *h)
 	enum cpu_idle_type idle = this_rq->idle_balance ?
 						CPU_IDLE : CPU_NOT_IDLE;
 
-	rebalance_domains(this_rq, idle);
-
 	/*
 	 * If this cpu has a pending nohz_balance_kick, then do the
 	 * balancing on behalf of the other idle cpus whose ticks are
-	 * stopped.
+	 * stopped. Do nohz_idle_balance *before* rebalance_domains to
+	 * give the idle cpus a chance to load balance. Else we may
+	 * load balance only within the local sched_domain hierarchy
+	 * and abort nohz_idle_balance altogether if we pull some load.
 	 */
 	nohz_idle_balance(this_rq, idle);
+	rebalance_domains(this_rq, idle);
 }
 
 /*
@@ -10202,7 +10248,7 @@ static void set_curr_task_fair(struct rq *rq)
 
 void init_cfs_rq(struct cfs_rq *cfs_rq)
 {
-	cfs_rq->tasks_timeline = RB_ROOT;
+	cfs_rq->tasks_timeline = RB_ROOT_CACHED;
 	cfs_rq->min_vruntime = (u64)(-(1LL << 20));
 #ifndef CONFIG_64BIT
 	cfs_rq->min_vruntime_copy = cfs_rq->min_vruntime;
@@ -10461,7 +10507,6 @@ const struct sched_class fair_sched_class = {
 	.rq_online		= rq_online_fair,
 	.rq_offline		= rq_offline_fair,
 
-	.task_waking		= task_waking_fair,
 #endif
 
 	.set_curr_task          = set_curr_task_fair,

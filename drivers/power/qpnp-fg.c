@@ -133,6 +133,11 @@ struct fg_mem_setting {
 	int	value;
 };
 
+struct fg_saved_data {
+	union power_supply_propval val;
+	unsigned long last_req_expires;
+};
+
 struct fg_mem_data {
 	u16	address;
 	u8	offset;
@@ -476,6 +481,7 @@ struct fg_chip {
 	struct device		*dev;
 	struct spmi_device	*spmi;
 	u8			pmic_subtype;
+	u8			zero_count;
 	u8			pmic_revision[4];
 	u8			revision[4];
 	u16			soc_base;
@@ -649,6 +655,7 @@ struct fg_chip {
 	bool			shutdown_in_process;
 	bool			nom_cap_unbound;
 	bool			low_batt_temp_comp;
+	struct fg_saved_data	saved_data[POWER_SUPPLY_PROP_MAX];
 };
 
 /* FG_MEMIF DEBUGFS structures */
@@ -2788,6 +2795,20 @@ out:
 	return rc;
 }
 
+// Read the beat count and write it into the beat_count arg;
+// return non-zero on failure.
+static int read_beat(struct fg_chip *chip, u8 *beat_count)
+{
+	int rc = fg_read(chip, beat_count,
+			 chip->mem_base + MEM_INTF_FG_BEAT_COUNT, 1);
+	if (rc)
+		pr_err("failed to read beat count rc=%d\n", rc);
+	else if (fg_debug_mask & FG_STATUS)
+		pr_info("current: %d, prev: %d\n", *beat_count,
+			chip->last_beat_count);
+	return rc;
+}
+
 #define SANITY_CHECK_PERIOD_MS	5000
 static void check_sanity_work(struct work_struct *work)
 {
@@ -2798,19 +2819,24 @@ static void check_sanity_work(struct work_struct *work)
 	u8 beat_count;
 	bool tried_once = false;
 
+	// Try one beat check once up-front to avoid the common
+	// case where the beat has changed and we don't need to hold
+	// the chip awake.
+	rc = read_beat(chip, &beat_count);
+	if (rc == 0 && chip->last_beat_count != beat_count) {
+		chip->last_beat_count = beat_count;
+		schedule_delayed_work(
+			&chip->check_sanity_work,
+			msecs_to_jiffies(SANITY_CHECK_PERIOD_MS));
+		return;
+	}
+
 	fg_stay_awake(&chip->sanity_wakeup_source);
 
 try_again:
-	rc = fg_read(chip, &beat_count,
-			chip->mem_base + MEM_INTF_FG_BEAT_COUNT, 1);
-	if (rc) {
-		pr_err("failed to read beat count rc=%d\n", rc);
+	rc = read_beat(chip, &beat_count);
+	if (rc)
 		goto resched;
-	}
-
-	if (fg_debug_mask & FG_STATUS)
-		pr_info("current: %d, prev: %d\n", beat_count,
-			chip->last_beat_count);
 
 	if (chip->last_beat_count == beat_count) {
 		if (!tried_once) {
@@ -4083,6 +4109,14 @@ static bool is_usb_present(struct fg_chip *chip)
 	return prop.intval != 0;
 }
 
+static bool usb_psy_initialized(struct fg_chip *chip)
+{
+	if (chip->usb_psy)
+		return true;
+	chip->usb_psy = power_supply_get_by_name("usb");
+	return chip->usb_psy;
+}
+
 static bool is_dc_present(struct fg_chip *chip)
 {
 	union power_supply_propval prop = {0,};
@@ -4713,12 +4747,40 @@ static enum power_supply_property fg_power_props[] = {
 	POWER_SUPPLY_PROP_BATTERY_INFO_ID,
 };
 
+#define FG_RATE_LIM_MS (5 * MSEC_PER_SEC)
+
 static int fg_power_get_property(struct power_supply *psy,
 				       enum power_supply_property psp,
 				       union power_supply_propval *val)
 {
 	struct fg_chip *chip = container_of(psy, struct fg_chip, bms_psy);
+	struct fg_saved_data *sd = chip->saved_data + psp;
+	union power_supply_propval typec_sts = { .intval = -1 };
 	bool vbatt_low_sts;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_RESISTANCE_ID:
+	case POWER_SUPPLY_PROP_VOLTAGE_MAX_DESIGN:
+	case POWER_SUPPLY_PROP_CYCLE_COUNT_ID:
+	case POWER_SUPPLY_PROP_CHARGE_NOW:
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+	case POWER_SUPPLY_PROP_SOC_REPORTING_READY:
+		/* These props don't require a fg query; don't ratelimit them */
+		break;
+	default:
+	if (!sd->last_req_expires)
+			break;
+		if (usb_psy_initialized(chip))
+			power_supply_get_property(chip->usb_psy,
+				POWER_SUPPLY_PROP_TYPEC_MODE, &typec_sts);
+		if (typec_sts.intval == POWER_SUPPLY_TYPEC_NONE &&
+			time_before(jiffies, sd->last_req_expires)) {
+			*val = sd->val;
+			return 0;
+		}
+		break;
+	}
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_BATTERY_TYPE:
@@ -4824,6 +4886,9 @@ static int fg_power_get_property(struct power_supply *psy,
 	default:
 		return -EINVAL;
 	}
+
+	sd->val = *val;
+	sd->last_req_expires = jiffies + msecs_to_jiffies(FG_RATE_LIM_MS);
 
 	return 0;
 }

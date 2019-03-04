@@ -20,6 +20,11 @@ KBUILD_DEFCONFIG := defconfig
 KBUILD_CFLAGS	+= -mgeneral-regs-only
 KBUILD_CFLAGS	+= -fno-pic
 KBUILD_CFLAGS	+= $(call cc-option, -mpc-relative-literal-loads)
+ifeq ($(cc-name),clang)
+KBUILD_CFLAGS	+= -DCONFIG_ARCH_SUPPORTS_INT128
+else
+KBUILD_CFLAGS	+= $(call cc-ifversion, -ge, 0500, -DCONFIG_ARCH_SUPPORTS_INT128)
+endif
 
 ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
 KBUILD_CPPFLAGS	+= -mbig-endian
@@ -30,6 +35,25 @@ KBUILD_CPPFLAGS	+= -mlittle-endian
 AS		+= -EL
 LD		+= -EL
 endif
+
+# Cortex-A53 optimizations
+arch-$(CONFIG_ARCH_MSM8916)	:= $(call cc-option,-mcpu=cortex-a53+crc+crypto,-march=armv8-a+crc+crypto)
+tune-$(CONFIG_ARCH_MSM8916)	:= -mtune=cortex-a53
+arch-$(CONFIG_ARCH_MSM8917)	:= $(call cc-option,-mcpu=cortex-a53+crc+crypto,-march=armv8-a+crc+crypto)
+tune-$(CONFIG_ARCH_MSM8917)	:= -mtune=cortex-a53
+arch-$(CONFIG_ARCH_MSM8920)	:= $(call cc-option,-mcpu=cortex-a53+crc+crypto,-march=armv8-a+crc+crypto)
+tune-$(CONFIG_ARCH_MSM8920)	:= -mtune=cortex-a53
+arch-$(CONFIG_ARCH_MSM8937)	:= $(call cc-option,-mcpu=cortex-a53+crc+crypto,-march=armv8-a+crc+crypto)
+tune-$(CONFIG_ARCH_MSM8937)	:= -mtune=cortex-a53
+arch-$(CONFIG_ARCH_MSM8940)	:= $(call cc-option,-mcpu=cortex-a53+crc+crypto,-march=armv8-a+crc+crypto)
+tune-$(CONFIG_ARCH_MSM8940)	:= -mtune=cortex-a53
+arch-$(CONFIG_ARCH_MSM8953)	:= $(call cc-option,-mcpu=cortex-a53+crc+crypto,-march=armv8-a+crc+crypto)
+tune-$(CONFIG_ARCH_MSM8953)	:= -mtune=cortex-a53
+arch-$(CONFIG_ARCH_SDM450)	:= $(call cc-option,-mcpu=cortex-a53+crc+crypto,-march=armv8-a+crc+crypto)
+tune-$(CONFIG_ARCH_SDM450)	:= -mtune=cortex-a53
+
+KBUILD_CFLAGS	+= $(arch-y) $(tune-y)
+KBUILD_AFLAGS	+= $(arch-y) $(tune-y)
 
 CHECKFLAGS	+= -D__aarch64__
 
@@ -56,6 +80,7 @@ KASAN_SHADOW_OFFSET := $(shell printf "0x%08x00000000\n" $$(( \
 
 export	TEXT_OFFSET GZFLAGS
 
+core-y		+= arch/arm64/hotplug/
 core-y		+= arch/arm64/kernel/ arch/arm64/mm/
 core-$(CONFIG_NET) += arch/arm64/net/
 core-$(CONFIG_KVM) += arch/arm64/kvm/

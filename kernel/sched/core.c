@@ -138,6 +138,10 @@ const char *migrate_type_names[] = {"GROUP_TO_RQ", "RQ_TO_GROUP",
 ATOMIC_NOTIFIER_HEAD(migration_notifier_head);
 ATOMIC_NOTIFIER_HEAD(load_alert_notifier_head);
 
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+DEFINE_PER_CPU_SHARED_ALIGNED(struct nr_stats_s, runqueue_stats);
+#endif
+
 void start_bandwidth_timer(struct hrtimer *period_timer, ktime_t period)
 {
 	unsigned long delta;
@@ -1175,6 +1179,13 @@ inline int task_curr(const struct task_struct *p)
 	return cpu_curr(task_cpu(p)) == p;
 }
 
+/*
+ * switched_from, switched_to and prio_changed must _NOT_ drop rq->lock,
+ * use the balance_callback list if you want balancing.
+ *
+ * this means any call to check_class_changed() must be followed by a call to
+ * balance_callback().
+ */
 static inline void check_class_changed(struct rq *rq, struct task_struct *p,
 				       const struct sched_class *prev_class,
 				       int oldprio)
@@ -1182,6 +1193,7 @@ static inline void check_class_changed(struct rq *rq, struct task_struct *p,
 	if (prev_class != p->sched_class) {
 		if (prev_class->switched_from)
 			prev_class->switched_from(rq, p);
+
 		p->sched_class->switched_to(rq, p);
 	} else if (oldprio != p->prio || dl_task(p))
 		p->sched_class->prio_changed(rq, p, oldprio);
@@ -4412,8 +4424,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 		if (p->sched_class->migrate_task_rq)
 			p->sched_class->migrate_task_rq(p, new_cpu);
 		p->se.nr_migrations++;
-		perf_sw_event(PERF_COUNT_SW_CPU_MIGRATIONS, 1, NULL, 0);
-
+		perf_sw_event_sched(PERF_COUNT_SW_CPU_MIGRATIONS, 1, 0);
 		fixup_busy_time(p, new_cpu);
 	}
 
@@ -4832,8 +4843,12 @@ ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 
 	p->state = TASK_RUNNING;
 #ifdef CONFIG_SMP
-	if (p->sched_class->task_woken)
+	if (p->sched_class->task_woken) {
+		/*
+		 * XXX can drop rq->lock; most likely ok.
+		 */
 		p->sched_class->task_woken(rq, p);
+	}
 
 	if (rq->idle_stamp) {
 		u64 delta = rq_clock(rq) - rq->idle_stamp;
@@ -4852,12 +4867,17 @@ ttwu_do_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
 static void
 ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
 {
+	int en_flags = ENQUEUE_WAKEUP;
+
 #ifdef CONFIG_SMP
 	if (p->sched_contributes_to_load)
 		rq->nr_uninterruptible--;
+
+	if (wake_flags & WF_MIGRATED)
+		en_flags |= ENQUEUE_MIGRATED;
 #endif
 
-	ttwu_activate(rq, p, ENQUEUE_WAKEUP | ENQUEUE_WAKING);
+	ttwu_activate(rq, p, en_flags);
 	ttwu_do_wakeup(rq, p, wake_flags);
 }
 
@@ -4898,9 +4918,15 @@ void sched_ttwu_pending(void)
 	raw_spin_lock_irqsave(&rq->lock, flags);
 
 	while (llist) {
+		int wake_flags = 0;
+
 		p = llist_entry(llist, struct task_struct, wake_entry);
 		llist = llist_next(llist);
-		ttwu_do_activate(rq, p, 0);
+
+		if (p->sched_remote_wakeup)
+			wake_flags = WF_MIGRATED;
+
+		ttwu_do_activate(rq, p, wake_flags);
 	}
 
 	raw_spin_unlock_irqrestore(&rq->lock, flags);
@@ -4955,9 +4981,11 @@ void scheduler_ipi(void)
 	irq_exit();
 }
 
-static void ttwu_queue_remote(struct task_struct *p, int cpu)
+static void ttwu_queue_remote(struct task_struct *p, int cpu, int wake_flags)
 {
 	struct rq *rq = cpu_rq(cpu);
+
+	p->sched_remote_wakeup = !!(wake_flags & WF_MIGRATED);
 
 	if (llist_add(&p->wake_entry, &cpu_rq(cpu)->wake_list)) {
 		if (!set_nr_if_polling(rq->idle))
@@ -4997,20 +5025,20 @@ bool cpus_share_cache(int this_cpu, int that_cpu)
 }
 #endif /* CONFIG_SMP */
 
-static void ttwu_queue(struct task_struct *p, int cpu)
+static void ttwu_queue(struct task_struct *p, int cpu, int wake_flags)
 {
 	struct rq *rq = cpu_rq(cpu);
 
 #if defined(CONFIG_SMP)
 	if (sched_feat(TTWU_QUEUE) && !cpus_share_cache(smp_processor_id(), cpu)) {
 		sched_clock_cpu(cpu); /* sync clocks x-cpu */
-		ttwu_queue_remote(p, cpu);
+		ttwu_queue_remote(p, cpu, wake_flags);
 		return;
 	}
 #endif
 
 	raw_spin_lock(&rq->lock);
-	ttwu_do_activate(rq, p, 0);
+	ttwu_do_activate(rq, p, wake_flags);
 	raw_spin_unlock(&rq->lock);
 }
 
@@ -5064,6 +5092,28 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 	success = 1; /* we're going to change ->state */
 
+	/*
+	 * Ensure we load p->on_rq _after_ p->state, otherwise it would
+	 * be possible to, falsely, observe p->on_rq == 0 and get stuck
+	 * in smp_cond_load_acquire() below.
+	 *
+	 * sched_ttwu_pending()                 try_to_wake_up()
+	 *   [S] p->on_rq = 1;                  [L] P->state
+	 *       UNLOCK rq->lock  -----.
+	 *                              \
+	 *				 +---   RMB
+	 * schedule()                   /
+	 *       LOCK rq->lock    -----'
+	 *       UNLOCK rq->lock
+	 *
+	 * [task p]
+	 *   [S] p->state = UNINTERRUPTIBLE     [L] p->on_rq
+	 *
+	 * Pairs with the UNLOCK+LOCK on rq->lock from the
+	 * last wakeup of our task and the schedule that got our task
+	 * current.
+	 */
+	smp_rmb();
 	if (p->on_rq && ttwu_remote(p, wake_flags))
 		goto stat;
 
@@ -5098,9 +5148,6 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 	p->sched_contributes_to_load = !!task_contributes_to_load(p);
 	p->state = TASK_WAKING;
 
-	if (p->sched_class->task_waking)
-		p->sched_class->task_waking(p);
-
 	cpu = select_task_rq(p, p->wake_cpu, SD_BALANCE_WAKE, wake_flags);
 
 	/* Refresh src_cpu as it could have changed since we last read it */
@@ -5112,7 +5159,7 @@ try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
 
 	set_task_last_wake(p, wallclock);
 #endif /* CONFIG_SMP */
-	ttwu_queue(p, cpu);
+	ttwu_queue(p, cpu, wake_flags);
 stat:
 	ttwu_stat(p, cpu, wake_flags);
 
@@ -5282,6 +5329,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	memset(&p->se.statistics, 0, sizeof(p->se.statistics));
 #endif
 
+#ifdef CONFIG_CPU_FREQ_STAT
+	cpufreq_task_stats_init(p);
+#endif
+
 	RB_CLEAR_NODE(&p->dl.rb_node);
 	hrtimer_init(&p->dl.dl_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	__dl_clear_params(p);
@@ -5370,11 +5421,12 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	unsigned long flags;
 	int cpu = get_cpu();
 
+	__sched_fork(clone_flags, p);
+
 #ifdef CONFIG_CPU_FREQ_STAT
-	cpufreq_task_stats_init(p);
+	cpufreq_task_stats_alloc(p);
 #endif
 
-	__sched_fork(clone_flags, p);
 	/*
 	 * We mark the process as running here. This guarantees that
 	 * nobody will actually run it, and a signal or other external
@@ -5753,23 +5805,35 @@ static void finish_task_switch(struct rq *rq, struct task_struct *prev)
 #ifdef CONFIG_SMP
 
 /* rq->lock is NOT held, but preemption is disabled */
-static inline void post_schedule(struct rq *rq)
+static void __balance_callback(struct rq *rq)
 {
-	if (rq->post_schedule) {
-		unsigned long flags;
+	struct callback_head *head, *next;
+	void (*func)(struct rq *rq);
+	unsigned long flags;
 
-		raw_spin_lock_irqsave(&rq->lock, flags);
-		if (rq->curr->sched_class->post_schedule)
-			rq->curr->sched_class->post_schedule(rq);
-		raw_spin_unlock_irqrestore(&rq->lock, flags);
+	raw_spin_lock_irqsave(&rq->lock, flags);
+	head = rq->balance_callback;
+	rq->balance_callback = NULL;
+	while (head) {
+		func = (void (*)(struct rq *))head->func;
+		next = head->next;
+		head->next = NULL;
+		head = next;
 
-		rq->post_schedule = 0;
+		func(rq);
 	}
+	raw_spin_unlock_irqrestore(&rq->lock, flags);
+}
+
+static inline void balance_callback(struct rq *rq)
+{
+	if (unlikely(rq->balance_callback))
+		__balance_callback(rq);
 }
 
 #else
 
-static inline void post_schedule(struct rq *rq)
+static inline void balance_callback(struct rq *rq)
 {
 }
 
@@ -5790,7 +5854,7 @@ asmlinkage __visible void schedule_tail(struct task_struct *prev)
 	 * FIXME: do we need to worry about rq being invalidated by the
 	 * task_switch?
 	 */
-	post_schedule(rq);
+	balance_callback(rq);
 
 	if (current->set_child_tid)
 		put_user(task_pid_vnr(current), current->set_child_tid);
@@ -5864,6 +5928,61 @@ unsigned long nr_running(void)
 
 	return sum;
 }
+
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+unsigned long avg_nr_running(void)
+{
+	unsigned long i, sum = 0;
+	unsigned int seqcnt, ave_nr_running;
+
+	for_each_online_cpu(i) {
+		struct nr_stats_s *stats = &per_cpu(runqueue_stats, i);
+		struct rq *q = cpu_rq(i);
+
+		/*
+		 * Update average to avoid reading stalled value if there were
+		 * no run-queue changes for a long time. On the other hand if
+		 * the changes are happening right now, just read current value
+		 * directly.
+		 */
+		seqcnt = read_seqcount_begin(&stats->ave_seqcnt);
+		ave_nr_running = do_avg_nr_running(q);
+		if (read_seqcount_retry(&stats->ave_seqcnt, seqcnt)) {
+			read_seqcount_begin(&stats->ave_seqcnt);
+			ave_nr_running = stats->ave_nr_running;
+		}
+
+		sum += ave_nr_running;
+	}
+
+	return sum;
+}
+EXPORT_SYMBOL(avg_nr_running);
+
+unsigned long avg_cpu_nr_running(unsigned int cpu)
+{
+	unsigned int seqcnt, ave_nr_running;
+
+	struct nr_stats_s *stats = &per_cpu(runqueue_stats, cpu);
+	struct rq *q = cpu_rq(cpu);
+
+	/*
+	 * Update average to avoid reading stalled value if there were
+	 * no run-queue changes for a long time. On the other hand if
+	 * the changes are happening right now, just read current value
+	 * directly.
+	 */
+	seqcnt = read_seqcount_begin(&stats->ave_seqcnt);
+	ave_nr_running = do_avg_nr_running(q);
+	if (read_seqcount_retry(&stats->ave_seqcnt, seqcnt)) {
+		read_seqcount_begin(&stats->ave_seqcnt);
+		ave_nr_running = stats->ave_nr_running;
+	}
+
+	return ave_nr_running;
+}
+EXPORT_SYMBOL(avg_cpu_nr_running);
+#endif
 
 /*
  * Check if only the current task is running on the cpu.
@@ -6387,7 +6506,7 @@ need_resched:
 	} else
 		raw_spin_unlock_irq(&rq->lock);
 
-	post_schedule(rq);
+	balance_callback(rq);
 
 	sched_preempt_enable_no_resched();
 	if (need_resched())
@@ -6654,7 +6773,11 @@ void rt_mutex_setprio(struct task_struct *p, int prio)
 
 	check_class_changed(rq, p, prev_class, oldprio);
 out_unlock:
+	preempt_disable(); /* avoid rq from going away on us */
 	__task_rq_unlock(rq);
+
+	balance_callback(rq);
+	preempt_enable();
 }
 #endif
 
@@ -6850,6 +6973,8 @@ static void __setscheduler_params(struct task_struct *p,
 
 	if (policy == SETPARAM_POLICY)
 		policy = p->policy;
+	else
+		policy &= ~SCHED_RESET_ON_FORK;
 
 	p->policy = policy;
 
@@ -6958,6 +7083,20 @@ static bool check_same_owner(struct task_struct *p)
 		 uid_eq(cred->euid, pcred->uid));
 	rcu_read_unlock();
 	return match;
+}
+
+static bool dl_param_changed(struct task_struct *p,
+		const struct sched_attr *attr)
+{
+	struct sched_dl_entity *dl_se = &p->dl;
+
+	if (dl_se->dl_runtime != attr->sched_runtime ||
+		dl_se->dl_deadline != attr->sched_deadline ||
+		dl_se->dl_period != attr->sched_period ||
+		dl_se->flags != attr->sched_flags)
+		return true;
+
+	return false;
 }
 
 static int __sched_setscheduler(struct task_struct *p,
@@ -7089,7 +7228,7 @@ recheck:
 			goto change;
 		if (rt_policy(policy) && attr->sched_priority != p->rt_priority)
 			goto change;
-		if (dl_policy(policy))
+		if (dl_policy(policy) && dl_param_changed(p, attr))
 			goto change;
 
 		p->sched_reset_on_fork = reset_on_fork;
@@ -7184,9 +7323,16 @@ change:
 	}
 
 	check_class_changed(rq, p, prev_class, oldprio);
+	preempt_disable(); /* avoid rq from going away on us */
 	task_rq_unlock(rq, p, &flags);
 
 	rt_mutex_adjust_pi(p);
+
+	/*
+	 * Run balance callbacks after we've adjusted the PI chain.
+	 */
+	balance_callback(rq);
+	preempt_enable();
 
 	return 0;
 }
@@ -7946,34 +8092,23 @@ EXPORT_SYMBOL_GPL(yield_to);
  * This task is about to go to sleep on IO. Increment rq->nr_iowait so
  * that process accounting knows that this is a task in IO wait state.
  */
-void __sched io_schedule(void)
-{
-	struct rq *rq = raw_rq();
-
-	delayacct_blkio_start();
-	atomic_inc(&rq->nr_iowait);
-	blk_flush_plug(current);
-	current->in_iowait = 1;
-	schedule();
-	current->in_iowait = 0;
-	atomic_dec(&rq->nr_iowait);
-	delayacct_blkio_end();
-}
-EXPORT_SYMBOL(io_schedule);
-
 long __sched io_schedule_timeout(long timeout)
 {
-	struct rq *rq = raw_rq();
+	int old_iowait = current->in_iowait;
+	struct rq *rq;
 	long ret;
 
-	delayacct_blkio_start();
-	atomic_inc(&rq->nr_iowait);
-	blk_flush_plug(current);
 	current->in_iowait = 1;
+	blk_schedule_flush_plug(current);
+
+	delayacct_blkio_start();
+	rq = raw_rq();
+	atomic_inc(&rq->nr_iowait);
 	ret = schedule_timeout(timeout);
-	current->in_iowait = 0;
+	current->in_iowait = old_iowait;
 	atomic_dec(&rq->nr_iowait);
 	delayacct_blkio_end();
+
 	return ret;
 }
 EXPORT_SYMBOL(io_schedule_timeout);
@@ -9408,6 +9543,9 @@ enum s_alloc {
  * Build an iteration mask that can exclude certain CPUs from the upwards
  * domain traversal.
  *
+ * Only CPUs that can arrive at this group should be considered to continue
+ * balancing.
+ *
  * Asymmetric node setups can result in situations where the domain tree is of
  * unequal depth, make sure to skip domains that already cover the entire
  * range.
@@ -9419,18 +9557,31 @@ enum s_alloc {
  */
 static void build_group_mask(struct sched_domain *sd, struct sched_group *sg)
 {
-	const struct cpumask *span = sched_domain_span(sd);
+	const struct cpumask *sg_span = sched_group_cpus(sg);
 	struct sd_data *sdd = sd->private;
 	struct sched_domain *sibling;
 	int i;
 
-	for_each_cpu(i, span) {
+	for_each_cpu(i, sg_span) {
 		sibling = *per_cpu_ptr(sdd->sd, i);
-		if (!cpumask_test_cpu(i, sched_domain_span(sibling)))
+
+		/*
+		 * Can happen in the asymmetric case, where these siblings are
+		 * unused. The mask will not be empty because those CPUs that
+		 * do have the top domain _should_ span the domain.
+		 */
+		if (!sibling->child)
+			continue;
+
+		/* If we would not end up here, we can't continue from here */
+		if (!cpumask_equal(sg_span, sched_domain_span(sibling->child)))
 			continue;
 
 		cpumask_set_cpu(i, sched_group_mask(sg));
 	}
+
+	/* We must not have empty masks here */
+	WARN_ON_ONCE(cpumask_empty(sched_group_mask(sg)));
 }
 
 /*
@@ -10728,7 +10879,7 @@ void __init sched_init(void)
 		rq->sd = NULL;
 		rq->rd = NULL;
 		rq->cpu_capacity = SCHED_CAPACITY_SCALE;
-		rq->post_schedule = 0;
+		rq->balance_callback = NULL;
 		rq->active_balance = 0;
 		rq->next_balance = jiffies;
 		rq->push_cpu = 0;

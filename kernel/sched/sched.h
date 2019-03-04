@@ -117,11 +117,6 @@ static inline int task_has_dl_policy(struct task_struct *p)
 	return dl_policy(p->policy);
 }
 
-static inline bool dl_time_before(u64 a, u64 b)
-{
-	return (s64)(a - b) < 0;
-}
-
 /*
  * Tells if entity @a should preempt entity @b.
  */
@@ -422,8 +417,7 @@ struct cfs_rq {
 	u64 min_vruntime_copy;
 #endif
 
-	struct rb_root tasks_timeline;
-	struct rb_node *rb_leftmost;
+	struct rb_root_cached tasks_timeline;
 
 	/*
 	 * 'curr' points to currently running entity on this cfs_rq.
@@ -683,9 +677,10 @@ struct rq {
 
 	unsigned long cpu_capacity;
 
+	struct callback_head *balance_callback;
+
 	unsigned char idle_balance;
 	/* For active balancing */
-	int post_schedule;
 	int active_balance;
 	int push_cpu;
 	struct task_struct *push_task;
@@ -782,6 +777,7 @@ struct rq {
 #ifdef CONFIG_CPU_IDLE
 	/* Must be inspected within a rcu lock section */
 	struct cpuidle_state *idle_state;
+	int idle_state_idx;
 #endif
 };
 
@@ -802,6 +798,22 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 #define cpu_curr(cpu)		(cpu_rq(cpu)->curr)
 #define raw_rq()		raw_cpu_ptr(&runqueues)
 
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+struct nr_stats_s {
+	/* time-based average load */
+	u64 nr_last_stamp;
+	unsigned int ave_nr_running;
+	seqcount_t ave_seqcnt;
+};
+
+#define NR_AVE_PERIOD_EXP	28
+#define NR_AVE_SCALE(x)		((x) << FSHIFT)
+#define NR_AVE_PERIOD		(1 << NR_AVE_PERIOD_EXP)
+#define NR_AVE_DIV_PERIOD(x)	((x) >> NR_AVE_PERIOD_EXP)
+
+DECLARE_PER_CPU(struct nr_stats_s, runqueue_stats);
+#endif
+
 static inline u64 rq_clock(struct rq *rq)
 {
 	return rq->clock;
@@ -819,6 +831,21 @@ extern int migrate_swap(struct task_struct *, struct task_struct *);
 #endif /* CONFIG_NUMA_BALANCING */
 
 #ifdef CONFIG_SMP
+
+static inline void
+queue_balance_callback(struct rq *rq,
+		       struct callback_head *head,
+		       void (*func)(struct rq *rq))
+{
+	lockdep_assert_held(&rq->lock);
+
+	if (unlikely(head->next))
+		return;
+
+	head->func = (void (*)(struct callback_head *))func;
+	head->next = rq->balance_callback;
+	rq->balance_callback = head;
+}
 
 extern void sched_ttwu_pending(void);
 
@@ -1709,9 +1736,9 @@ static const u32 prio_to_wmult[40] = {
 #define ENQUEUE_HEAD		0x08
 #define ENQUEUE_REPLENISH	0x10
 #ifdef CONFIG_SMP
-#define ENQUEUE_WAKING		0x20
+#define ENQUEUE_MIGRATED	0x20
 #else
-#define ENQUEUE_WAKING		0x00
+#define ENQUEUE_MIGRATED	0x00
 #endif
 #define ENQUEUE_MIGRATING	0x40
 
@@ -1744,7 +1771,6 @@ struct sched_class {
 	void (*migrate_task_rq)(struct task_struct *p, int next_cpu);
 
 	void (*post_schedule) (struct rq *this_rq);
-	void (*task_waking) (struct task_struct *task);
 	void (*task_woken) (struct rq *this_rq, struct task_struct *task);
 
 	void (*set_cpus_allowed)(struct task_struct *p,
@@ -1824,6 +1850,17 @@ static inline struct cpuidle_state *idle_get_state(struct rq *rq)
 	WARN_ON(!rcu_read_lock_held());
 	return rq->idle_state;
 }
+
+static inline void idle_set_state_idx(struct rq *rq, int idle_state_idx)
+{
+	rq->idle_state_idx = idle_state_idx;
+}
+
+static inline int idle_get_state_idx(struct rq *rq)
+{
+	WARN_ON(!rcu_read_lock_held());
+	return rq->idle_state_idx;
+}
 #else
 static inline void idle_set_state(struct rq *rq,
 				  struct cpuidle_state *idle_state)
@@ -1833,6 +1870,15 @@ static inline void idle_set_state(struct rq *rq,
 static inline struct cpuidle_state *idle_get_state(struct rq *rq)
 {
 	return NULL;
+}
+
+static inline void idle_set_state_idx(struct rq *rq, int idle_state_idx)
+{
+}
+
+static inline int idle_get_state_idx(struct rq *rq)
+{
+	return -1;
 }
 #endif
 
@@ -1863,13 +1909,48 @@ extern void update_idle_cpu_load(struct rq *this_rq);
 
 extern void init_task_runnable_average(struct task_struct *p);
 
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+static inline unsigned int do_avg_nr_running(struct rq *rq)
+{
+
+	struct nr_stats_s *nr_stats = &per_cpu(runqueue_stats, rq->cpu);
+	unsigned int ave_nr_running = nr_stats->ave_nr_running;
+	s64 nr, deltax;
+
+	deltax = rq->clock_task - nr_stats->nr_last_stamp;
+	nr = NR_AVE_SCALE(rq->nr_running);
+
+	if (deltax > NR_AVE_PERIOD)
+		ave_nr_running = nr;
+	else
+		ave_nr_running +=
+			NR_AVE_DIV_PERIOD(deltax * (nr - ave_nr_running));
+
+	return ave_nr_running;
+}
+#endif
+
 static inline void add_nr_running(struct rq *rq, unsigned count)
 {
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+	struct nr_stats_s *nr_stats = &per_cpu(runqueue_stats, rq->cpu);
+#endif
+    
 	unsigned prev_nr = rq->nr_running;
+        
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+	write_seqcount_begin(&nr_stats->ave_seqcnt);
+	nr_stats->ave_nr_running = do_avg_nr_running(rq);
+	nr_stats->nr_last_stamp = rq->clock_task;
+#endif
 
 	sched_update_nr_prod(cpu_of(rq), count, true);
 	rq->nr_running = prev_nr + count;
 
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+	write_seqcount_end(&nr_stats->ave_seqcnt);
+#endif
+        
 	if (prev_nr < 2 && rq->nr_running >= 2) {
 #ifdef CONFIG_SMP
 		if (!rq->rd->overload)
@@ -1894,8 +1975,23 @@ static inline void add_nr_running(struct rq *rq, unsigned count)
 
 static inline void sub_nr_running(struct rq *rq, unsigned count)
 {
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+	struct nr_stats_s *nr_stats = &per_cpu(runqueue_stats, rq->cpu);
+#endif
+        
 	sched_update_nr_prod(cpu_of(rq), count, false);
+        
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+	write_seqcount_begin(&nr_stats->ave_seqcnt);
+	nr_stats->ave_nr_running = do_avg_nr_running(rq);
+	nr_stats->nr_last_stamp = rq->clock_task;
+#endif
+        
 	rq->nr_running -= count;
+        
+#if defined(CONFIG_INTELLI_PLUG) || defined(CONFIG_LAZYPLUG)
+	write_seqcount_end(&nr_stats->ave_seqcnt);
+#endif
 }
 
 static inline void rq_last_tick_reset(struct rq *rq)
@@ -2214,4 +2310,10 @@ static inline u64 irq_time_read(int cpu)
 }
 #endif /* CONFIG_64BIT */
 #endif /* CONFIG_IRQ_TIME_ACCOUNTING */
+
+/*
+ * task_may_not_preempt - check whether a task may not be preemptible soon
+ */
+extern bool task_may_not_preempt(struct task_struct *task, int cpu);
+
 #endif /* CONFIG_SCHED_QHMP */

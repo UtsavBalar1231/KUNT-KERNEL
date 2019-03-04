@@ -54,7 +54,7 @@
 #define QUAT_MI2S_ID	(1 << 3)
 #define QUIN_MI2S_ID	(1 << 4)
 
-#define DEFAULT_MCLK_RATE 9600000
+#define DEFAULT_MCLK_RATE 12288000
 
 #define WCD_MBHC_DEF_RLOADS 5
 #define MAX_WSA_CODEC_NAME_LENGTH 80
@@ -1212,10 +1212,10 @@ static int msm8952_wsa_switch_event(struct snd_soc_dapm_widget *w,
 		}
 		if (atomic_dec_return(&supply->ref) == 0)
 			ret = regulator_disable(supply->supply);
-			if (ret)
-				dev_err(w->codec->component.card->dev,
-					"%s: Failed to disable wsa switch supply\n",
-					__func__);
+                if (ret)
+			dev_err(w->codec->component.card->dev,
+				"%s: Failed to disable wsa switch supply\n",
+				__func__);
 		break;
 	default:
 		break;

@@ -32,10 +32,16 @@ aes-neon-blk-y := aes-glue-neon.o aes-neon.o
 obj-$(CONFIG_CRYPTO_SPECK_NEON) += speck-neon.o
 speck-neon-y := speck-neon-core.o speck-neon-glue.o
 
-AFLAGS_aes-ce.o		:= -DINTERLEAVE=2 -DINTERLEAVE_INLINE
+AFLAGS_aes-ce.o		:= -DINTERLEAVE=4 -DINTERLEAVE_INLINE
 AFLAGS_aes-neon.o	:= -DINTERLEAVE=4
 
 CFLAGS_aes-glue-ce.o	:= -DUSE_V8_CRYPTO_EXTENSIONS
+
+obj-$(CONFIG_CRYPTO_CRC32_ARM64) += crc32-arm64.o
+
+CFLAGS_crc32-arm64.o	:= -mcpu=generic+crc
+
+ccflags-y := -O3
 
 $(obj)/aes-glue-%.o: $(src)/aes-glue.c FORCE
 	$(call if_changed_rule,cc_o_c)
